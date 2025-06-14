@@ -69,8 +69,8 @@ async def async_setup_entry(hass: HomeAssistant, config_entry):
     coordinator = PeacefairCoordinator(hass, protocol, host, port, slave, scan_interval)
     hass.data[config_entry.entry_id][COORDINATOR] = coordinator
     await coordinator.async_config_entry_first_refresh()
-    hass.async_create_task(hass.config_entries.async_forward_entry_setup(
-        config_entry, "sensor"))
+    hass.async_create_task(hass.config_entries.async_forward_entry_setups(
+        config_entry, ["sensor"]))
     hass.data[config_entry.entry_id][UN_SUBDISCRIPT] = config_entry.add_update_listener(update_listener)
 
     def service_handle(service):
