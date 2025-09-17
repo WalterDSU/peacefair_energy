@@ -3,6 +3,7 @@ import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
 import os
 from datetime import timedelta
+import asyncio
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.core import HomeAssistant
 from .const import(
@@ -72,7 +73,7 @@ async def async_setup_entry(hass: HomeAssistant, config_entry):
     await hass.config_entries.async_forward_entry_setups(config_entry, ["sensor"])
     hass.data[config_entry.entry_id][UN_SUBDISCRIPT] = config_entry.add_update_listener(update_listener)
 
-    def service_handle(service):
+    async def async_service_handle(service):
         entity_id = service.data[ATTR_ENTITY_ID]
         energy_sensor = next(
             (sensor for sensor in hass.data[DOMAIN][ENERGY_SENSOR] if sensor.entity_id == entity_id),
@@ -85,12 +86,12 @@ async def async_setup_entry(hass: HomeAssistant, config_entry):
             coordinator = hass.data[config_entry.entry_id][COORDINATOR]
             if coordinator is not None:
                 coordinator.reset_energy()
-                energy_sensor.reset()
+                await energy_sensor.reset()  # 等待异步方法完成
 
     hass.services.async_register(
         DOMAIN,
         SERVICE_RESET_ENERGY,
-        service_handle,
+        async_service_handle,
         schema=RESET_ENERGY_SCHEMA,
     )
 
@@ -98,7 +99,6 @@ async def async_setup_entry(hass: HomeAssistant, config_entry):
 
 
 async def async_unload_entry(hass: HomeAssistant, config_entry):
-
     await hass.config_entries.async_forward_entry_unloads(config_entry, ["sensor"])
 
     host = config_entry.data[CONF_HOST]
@@ -113,15 +113,22 @@ async def async_unload_entry(hass: HomeAssistant, config_entry):
     if unsub is not None:
         unsub()
     hass.data.pop(config_entry.entry_id)
+    
+    # 异步执行文件操作
     storage_path = hass.config.path(f"{STORAGE_PATH}")
     record_file = hass.config.path(f"{STORAGE_PATH}/{config_entry.entry_id}_state.json")
     reset_file = hass.config.path(f"{STORAGE_PATH}/{DOMAIN}_reset.json")
-    if os.path.exists(record_file):
-        os.remove(record_file)
-    if os.path.exists(reset_file):
-        os.remove(reset_file)
-    if len(os.listdir(storage_path)) == 0:
-        os.rmdir(storage_path)
+    
+    def remove_files():
+        if os.path.exists(record_file):
+            os.remove(record_file)
+        if os.path.exists(reset_file):
+            os.remove(reset_file)
+        if len(os.listdir(storage_path)) == 0:
+            os.rmdir(storage_path)
+    
+    await hass.async_add_executor_job(remove_files)
+    
     return True
 
 
@@ -156,5 +163,9 @@ class PeacefairCoordinator(DataUpdateCoordinator):
             data = data_update
             _LOGGER.debug(f"Got Data {data}")
             if self._updates is not None:
-                self._updates()
+                # 确保异步方法被正确调用
+                if asyncio.iscoroutinefunction(self._updates):
+                    await self._updates()
+                else:
+                    self._updates()
         return data

@@ -25,6 +25,7 @@ import time
 import logging
 import os
 import datetime
+import asyncio
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -94,10 +95,18 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     coordinator = hass.data[config_entry.entry_id][COORDINATOR]
     ident = coordinator.host.replace(".", "_")
     updates = {}
-    os.makedirs(hass.config.path(STORAGE_PATH), exist_ok=True)
+    # 创建目录（使用异步执行器运行）
+    def _ensure_dir():
+        os.makedirs(hass.config.path(STORAGE_PATH), exist_ok=True)
+    await hass.async_add_executor_job(_ensure_dir)
+
     record_file = hass.config.path(f"{STORAGE_PATH}/{config_entry.entry_id}_state.json")
     reset_file = hass.config.path(f"{STORAGE_PATH}/{DOMAIN}_reset.json")
-    json_data = load_json(record_file, default={})
+    
+    # 异步加载JSON数据
+    json_data = await hass.async_add_executor_job(load_json, record_file, {})
+    reset_json_data = await hass.async_add_executor_job(load_json, reset_file, {})
+    
     for history_type in HISTORIES.keys():
         state = STATE_UNKNOWN
         if len(json_data) > 0:
@@ -112,16 +121,16 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
             state = json_data[history_type]["real_state"]
             last_state = json_data["last_state"]
             last_time = json_data["last_time"]
-        r_sensor = HPGRealSensor(history_type, SensorDeviceClass.ENERGY, ident, h_sensor, state, last_state, last_time)
+        r_sensor = HPGRealSensor(history_type, SensorDeviceClass.ENERGY, ident, h_sensor, state, last_state, last_time, hass, record_file)
         sensors.append(r_sensor)
-        updates[history_type] = r_sensor.update_state
-    json_data = load_json(reset_file, default={})
-    if len(json_data) > 0:
-        last_reset = json_data.get("last_reset")
+        updates[history_type] = r_sensor.async_update_state  # 使用异步方法
+
+    if len(reset_json_data) > 0:
+        last_reset = reset_json_data.get("last_reset")
     else:
         last_reset = 0
     for sensor_type in HPG_SENSORS.keys():
-        sensor = HPGSensor(coordinator, config_entry.entry_id, sensor_type, ident, updates, last_reset)
+        sensor = HPGSensor(coordinator, config_entry.entry_id, sensor_type, ident, updates, last_reset, hass, reset_file)
         sensors.append(sensor)
         if sensor.device_class == sensor_type:
             if ENERGY_SENSOR not in hass.data[DOMAIN]:
@@ -191,13 +200,13 @@ class HPGHistorySensor(HPGBaseSensor):
     def name(self):
         return HISTORIES[self._history_type].get("history_name")
 
-    def update_state(self, state):
+    async def async_update_state(self, state):
         self._state = state
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()
 
 
 class HPGRealSensor(HPGBaseSensor):
-    def __init__(self, history_type, sensor_type, ident, history_sensor, state, last_state, last_time):
+    def __init__(self, history_type, sensor_type, ident, history_sensor, state, last_state, last_time, hass, record_file):
         super().__init__(sensor_type, ident)
         self._unique_id = f"{DOMAIN}.{ident}_{history_type}_real"
         self.entity_id = self._unique_id
@@ -206,13 +215,15 @@ class HPGRealSensor(HPGBaseSensor):
         self._last_state = last_state
         self._last_time = last_time
         self._state = state
+        self.hass = hass
+        self._record_file = record_file
 
     @property
     def name(self):
         return HISTORIES[self._history_type].get("real_name")
 
-    def update_state(self, cur_time, state):
-        if state!= STATE_UNKNOWN and self._last_state != STATE_UNKNOWN:
+    async def async_update_state(self, cur_time, state):
+        if state != STATE_UNKNOWN and self._last_state != STATE_UNKNOWN:
             differ = state
             last_time = time.localtime(self._last_time)
             current_time = time.localtime(cur_time)
@@ -222,7 +233,7 @@ class HPGRealSensor(HPGBaseSensor):
                     or (self._history_type == HISTORY_WEEK and last_time.tm_wday != current_time.tm_wday and current_time.tm_wday == 0) \
                     or (self._history_type == HISTORY_MONTH and last_time.tm_mon != current_time.tm_mon)\
                     or (self._history_type == HISTORY_YEAR and last_time.tm_year != current_time.tm_year):
-                self._history_sensor.update_state(self._state)
+                await self._history_sensor.async_update_state(self._state)
                 self._state = differ
             elif self._state == STATE_UNKNOWN:
                 self._state = differ
@@ -230,7 +241,19 @@ class HPGRealSensor(HPGBaseSensor):
                 self._state = self._state + differ
         self._last_time = cur_time
         self._last_state = state
-        self.schedule_update_ha_state()
+        self.async_write_ha_state()
+        json_data = {
+            "last_time": cur_time,
+            "last_state": state,
+            "history_state": self._history_sensor._state,
+            "real_state": self._state
+        }
+        # 异步保存
+        await self.hass.async_add_executor_job(
+            save_json,
+            self._record_file,
+            json_data
+        )
         return {
             "history_state": self._history_sensor._state,
             "real_state": self._state
@@ -238,17 +261,18 @@ class HPGRealSensor(HPGBaseSensor):
 
 
 class HPGSensor(CoordinatorEntity, HPGBaseSensor):
-    def __init__(self, coordinator, entry_id, sensor_type, ident, energy_updates, last_reset):
+    def __init__(self, coordinator, entry_id, sensor_type, ident, energy_updates, last_reset, hass, reset_file):
         super().__init__(coordinator)
         HPGBaseSensor.__init__(self, sensor_type, ident)
         self._unique_id = f"{DOMAIN}.{ident}_{sensor_type}"
         self.entity_id = self._unique_id
         self._energy_updates = energy_updates
         self._last_reset = datetime.datetime.fromtimestamp(last_reset)
-        self._record_file = f"{STORAGE_PATH}/{entry_id}_state.json"
-        self._reset_file = f"{STORAGE_PATH}/{entry_id}_reset.json"
+        self._record_file = hass.config.path(f"{STORAGE_PATH}/{entry_id}_state.json")
+        self._reset_file = reset_file
+        self.hass = hass
         if self._sensor_type == SensorDeviceClass.ENERGY:
-            coordinator.set_update(self.update_state)
+            coordinator.set_update(self.async_update_state)
 
     @property
     def state(self):
@@ -261,13 +285,19 @@ class HPGSensor(CoordinatorEntity, HPGBaseSensor):
     def name(self):
         return HPG_SENSORS[self._sensor_type].get("name")
 
-    def update_state(self):
+    async def async_update_state(self):
         cur_time = time.time()
         json_data = {"last_time": cur_time, "last_state": self.state}
         if self._energy_updates is not None:
             for real_type in self._energy_updates:
-                json_data[real_type] = self._energy_updates[real_type](cur_time, self.state)
-            save_json(self.hass.config.path(self._record_file), json_data)
+                update_result = await self._energy_updates[real_type](cur_time, self.state)
+                json_data[real_type] = update_result
+            # 异步保存
+            await self.hass.async_add_executor_job(
+                save_json,
+                self._record_file,
+                json_data
+            )
 
     @property
     def last_reset(self):
@@ -278,8 +308,13 @@ class HPGSensor(CoordinatorEntity, HPGBaseSensor):
     def state_attributes(self):
         return {ATTR_LAST_RESET: self.last_reset.isoformat()} if self._sensor_type == SensorDeviceClass.ENERGY else {}
 
-    def reset(self):
+    async def async_reset(self):
         self._last_reset = datetime.datetime.now()
         json_data = {"last_reset": self._last_reset.timestamp()}
         _LOGGER.debug(f"Energy reset")
-        save_json(self.hass.config.path(self._reset_file), json_data)
+        # 异步保存
+        await self.hass.async_add_executor_job(
+            save_json,
+            self._reset_file,
+            json_data
+        )

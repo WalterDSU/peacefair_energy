@@ -1,8 +1,10 @@
 import logging
 import asyncio
 from pymodbus.client import ModbusTcpClient, ModbusUdpClient
-from pymodbus.transaction import ModbusRtuFramer, ModbusIOException
-from pymodbus.pdu import ModbusRequest
+from pymodbus.framer.rtu import FramerRTU
+from pymodbus.transaction.transaction import ModbusIOException
+from pymodbus.pdu import ModbusPDU
+#from pymodbus.exceptions import ModbusException
 import threading
 
 try:
@@ -35,6 +37,29 @@ HPG_SENSOR_TYPES = [
 
 _LOGGER = logging.getLogger(__name__)
 
+class ModbusRequest(ModbusPDU):
+    """Base class for a modbus request PDU."""
+
+    function_code = -1
+
+    def __init__(self, slave, transaction, skip_encode):
+        """Proxy to the lower level initializer.
+
+        :param slave: Modbus slave slave ID
+        """
+        super().__init__(slave, transaction, skip_encode)
+        self.fut = None
+
+    def doException(self, exception):
+        """Build an error response based on the function.
+
+        :param exception: The exception to return
+        :raises: An exception response
+        """
+        exc = ExceptionResponse(self.function_code, exception)
+        Log.error("Exception response {}", exc)
+        return exc
+
 class ModbusResetEnergyRequest(ModbusRequest):
     _rtu_frame_size = 4
     function_code = 0x42
@@ -58,19 +83,19 @@ class ModbusHub:
             self._client = ModbusTcpClient(
                 host=host,
                 port=port,
-                framer=ModbusRtuFramer,
+                framer='rtu',
                 timeout=2,
-                retry_on_empty=True,
-                retry_on_invalid=False
+                #retry_on_empty=True,
+                #retry_on_invalid=False
             )
         elif protocol == "rtuoverudp":
             self._client = ModbusUdpClient(
                 host=host,
                 port=port,
-                framer=ModbusRtuFramer,
+                framer='rtu',
                 timeout=2,
-                retry_on_empty=False,
-                retry_on_invalid=False
+                #retry_on_empty=False,
+                #retry_on_invalid=False
             )
 
     def connect(self):
@@ -84,8 +109,8 @@ class ModbusHub:
     # 新增同步版本，供线程池调用
     def read_input_registers_sync(self, address, count):
         with self._lock:
-            kwargs = {"slave": self._slave}
-            return self._client.read_input_registers(address, count, **kwargs)
+            kwargs = {"device_id": self._slave}
+            return self._client.read_input_registers(address=address, count=count, **kwargs)
 
     # 异步版本，交给线程池执行，避免阻塞事件循环
     async def read_input_registers(self, address, count):

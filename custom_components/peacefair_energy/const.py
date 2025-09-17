@@ -8,7 +8,7 @@ ENERGY_SENSOR = "energy_sensor"
 UN_SUBDISCRIPT = "un_subdiscript"
 DEVICE_CLASS_FREQUENCY = "frequency"
 DEVICES = "devices"
-VERSION = "0.7.0"
+VERSION = "3.11.1"
 GATHER_TIME = "gather_time"
 PROTOCOLS = {
     "ModbusRTU Over UDP/IP": "rtuoverudp",
