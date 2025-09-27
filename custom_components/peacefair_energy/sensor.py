@@ -108,27 +108,25 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     reset_json_data = await hass.async_add_executor_job(load_json, reset_file, {})
     
     for history_type in HISTORIES.keys():
-        state = STATE_UNKNOWN
-        if len(json_data) > 0:
-            state = json_data[history_type]["history_state"]
+        # 修复：检查键是否存在，使用默认值
+        history_data = json_data.get(history_type, {})
+        state = history_data.get("history_state", STATE_UNKNOWN)
         _LOGGER.debug(f"Load {history_type} history data {state}")
         h_sensor = HPGHistorySensor(history_type, SensorDeviceClass.ENERGY, ident, state)
         sensors.append(h_sensor)
-        state = STATE_UNKNOWN
-        last_state = STATE_UNKNOWN
-        last_time = 0
-        if len(json_data) > 0:
-            state = json_data[history_type]["real_state"]
-            last_state = json_data["last_state"]
-            last_time = json_data["last_time"]
+        
+        # 修复：检查键是否存在，使用默认值
+        state = history_data.get("real_state", STATE_UNKNOWN)
+        last_state = json_data.get("last_state", STATE_UNKNOWN)
+        last_time = json_data.get("last_time", 0)
+        
         r_sensor = HPGRealSensor(history_type, SensorDeviceClass.ENERGY, ident, h_sensor, state, last_state, last_time, hass, record_file)
         sensors.append(r_sensor)
         updates[history_type] = r_sensor.async_update_state  # 使用异步方法
 
-    if len(reset_json_data) > 0:
-        last_reset = reset_json_data.get("last_reset")
-    else:
-        last_reset = 0
+    # 修复：检查键是否存在，使用默认值
+    last_reset = reset_json_data.get("last_reset", 0) if reset_json_data else 0
+    
     for sensor_type in HPG_SENSORS.keys():
         sensor = HPGSensor(coordinator, config_entry.entry_id, sensor_type, ident, updates, last_reset, hass, reset_file)
         sensors.append(sensor)
@@ -242,17 +240,26 @@ class HPGRealSensor(HPGBaseSensor):
         self._last_time = cur_time
         self._last_state = state
         self.async_write_ha_state()
-        json_data = {
-            "last_time": cur_time,
-            "last_state": state,
-            "history_state": self._history_sensor._state,
-            "real_state": self._state
-        }
+        
+        # 修复：加载现有数据，然后更新特定历史类型的数据
+        current_data = await self.hass.async_add_executor_job(load_json, self._record_file, {})
+        if not current_data:
+            current_data = {}
+            
+        # 更新当前历史类型的数据
+        if self._history_type not in current_data:
+            current_data[self._history_type] = {}
+            
+        current_data[self._history_type]["history_state"] = self._history_sensor._state
+        current_data[self._history_type]["real_state"] = self._state
+        current_data["last_time"] = cur_time
+        current_data["last_state"] = state
+        
         # 异步保存
         await self.hass.async_add_executor_job(
             save_json,
             self._record_file,
-            json_data
+            current_data
         )
         return {
             "history_state": self._history_sensor._state,
